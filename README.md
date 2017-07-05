@@ -1,140 +1,104 @@
-# CycleGAN-TensorFlow
-An implementation of CycleGan using TensorFlow (work in progress).
+<!-- <img src='imgs/horse2zebra.gif' align="right" width=384> 
 
-Original paper: https://arxiv.org/abs/1703.10593
+<br><br><br>
+-->
+# CycleGAN
 
-## Results on test data
+Tensorflow implementation for learning an image-to-image translation **without** input-output pairs. (Not completed!)
+The method is proposed by [Jun-Yan Zhu](https://people.eecs.berkeley.edu/~junyanz/) in 
+[Unpaired Image-to-Image Translation using Cycle-Consistent Adversarial Networkssee](https://arxiv.org/pdf/1703.10593.pdf). 
+For example:
 
-### apple -> orange
+<img src="https://junyanz.github.io/CycleGAN/images/teaser_high_res.jpg" width="1000px"/>
 
-| Input | Output | | Input | Output | | Input | Output |
-|-------|--------|-|-------|--------|-|-------|--------|
-|![apple2orange_1](samples/real_apple2orange_1.jpg) | ![apple2orange_1](samples/fake_apple2orange_1.jpg)| |![apple2orange_2](samples/real_apple2orange_2.jpg) | ![apple2orange_2](samples/fake_apple2orange_2.jpg)| |![apple2orange_3](samples/real_apple2orange_3.jpg) | ![apple2orange_3](samples/fake_apple2orange_3.jpg)|
+<!--
+## Applications
+### Monet Paintings to Photos
+<img src="imgs/painting2photo.jpg" width="1000px"/>
 
+### Collection Style Transfer
+<img src="imgs/photo2painting.jpg" width="1000px"/>
 
-### orange -> apple
+### Object Transfiguration
+<img src="imgs/objects.jpg" width="1000px"/>
 
-| Input | Output | | Input | Output | | Input | Output |
-|-------|--------|-|-------|--------|-|-------|--------|
-|![orange2apple_1](samples/real_orange2apple_1.jpg) | ![orange2apple_1](samples/fake_orange2apple_1.jpg)| |![orange2apple_2](samples/real_orange2apple_2.jpg) | ![orange2apple_2](samples/fake_orange2apple_2.jpg)| |![orange2apple_3](samples/real_orange2apple_3.jpg) | ![orange2apple_3](samples/fake_orange2apple_3.jpg)|
+### Season Transfer
+<img src="imgs/season.jpg" width="1000px"/>
 
-## Environment
+### Photo Enhancement: iPhone photo to DSLR photo
+<img src="imgs/photo_enhancement.jpg" width="1000px"/>
 
-* TensorFlow 1.0.0
-* Python 3.6.0
+-->
 
-## Data preparing
+## Prerequisites
+- tensorflow r1.0 or higher version
+- numpy 1.11.0
+- scipy 0.17.0
+- pillow 3.3.0
 
-* First, download a dataset, e.g. apple2orange
-
+## Getting Started
+### Installation
+- Install tensorflow from https://github.com/tensorflow/tensorflow
+- Clone this repo:
 ```bash
-$ bash download_dataset.sh apple2orange
+git clone https://github.com/xhujoy/CycleGAN-tensorflow
+cd CycleGAN-tensorflow
 ```
 
-* Write the dataset to tfrecords
-
+### Train
+- Download a dataset (e.g. zebra and horse images from ImageNet):
 ```bash
-$ python3 build_data.py
+bash ./download_dataset.sh horse2zebra
 ```
-
-Check `$ python3 build_data.py --help` for more details.
-
-## Training
-
+- Train a model:
 ```bash
-$ python3 train.py
+CUDA_VISIBLE_DEVICES=0 python main.py --dataset_dir=horse2zebra
 ```
-
-If you want to change some default settings, you can pass those to the command line, such as:
-
+- Use tensorboard to visualize the training details:
 ```bash
-$ python3 train.py  \
-    --X=data/tfrecords/horse.tfrecords \
-    --Y=data/tfrecords/zebra.tfrecords
+tensorboard --logdir=./logs
 ```
 
-Here is the list of arguments:
-```
-usage: train.py [-h] [--batch_size BATCH_SIZE] [--image_size IMAGE_SIZE]
-                [--use_lsgan [USE_LSGAN]] [--nouse_lsgan]
-                [--norm NORM] [--lambda1 LAMBDA1] [--lambda2 LAMBDA2]
-                [--learning_rate LEARNING_RATE] [--beta1 BETA1]
-                [--pool_size POOL_SIZE] [--ngf NGF] [--X X] [--Y Y]
-
-optional arguments:
-  -h, --help            show this help message and exit
-  --batch_size BATCH_SIZE
-                        batch size, default: 1
-  --image_size IMAGE_SIZE
-                        image size, default: 256
-  --use_lsgan [USE_LSGAN]
-                        use lsgan (mean squared error) or cross entropy loss,
-                        default: True
-  --nouse_lsgan
-  --norm NORM           [instance, batch] use instance norm or batch norm,
-                        default: instance
-  --lambda1 LAMBDA1     weight for forward cycle loss (X->Y->X), default: 10.0
-  --lambda2 LAMBDA2     weight for backward cycle loss (Y->X->Y), default:
-                        10.0
-  --learning_rate LEARNING_RATE
-                        initial learning rate for Adam, default: 0.0002
-  --beta1 BETA1         momentum term of Adam, default: 0.5
-  --pool_size POOL_SIZE
-                        size of image buffer that stores previously generated
-                        images, default: 50
-  --ngf NGF             number of gen filters in first conv layer, default: 64
-  --X X                 X tfrecords file for training, default:
-                        data/tfrecords/apple.tfrecords
-  --Y Y                 Y tfrecords file for training, default:
-                        data/tfrecords/orange.tfrecords
-```
-
-Check TensorBoard to see training progress and generated images.
-
-```
-$ tensorboard --logdir checkpoints/${datetime}
-```
-
-Here are some funny screenshots from TensorBoard when training orange -> apple:
-
-![train_screenshot](samples/train_screenshot.png)
-
-
-### Notes
-* If high constrast background colors between input and generated images are observed (e.g. black becomes white), you should restart your training!
-* Train several times to get the best models.
-
-## Export model
-You can export from a checkpoint to a standalone GraphDef file as follow:
-
+### Test
+- Finally, test the model:
 ```bash
-$ python3 export_graph.py --checkpoint_dir checkpoints/${datetime} \
-                          --XtoY_model apple2orange.pb \
-                          --YtoX_model orange2apple.pb \
-                          --image_size 256
+CUDA_VISIBLE_DEVICES=0 python main.py --dataset_dir=horse2zebra --phase=test --which_direction=AtoB
 ```
 
-
-## Inference
-After exporting model, you can use it for inference. For example:
-
+## Training and Test Details
+To train a model,  
 ```bash
-python3 inference.py --model pretrained/apple2orange.pb \
-                     --input input_sample.jpg \
-                     --output output_sample.jpg \
-                     --image_size 256
+CUDA_VISIBLE_DEVICES=0 python main.py --dataset_dir=/path/to/data/ 
+```
+Models are saved to `./checkpoints/` (can be changed by passing `--checkpoint_dir=your_dir`).  
+
+To test the model,
+```bash
+CUDA_VISIBLE_DEVICES=0 python main.py --dataset_dir=/path/to/data/ --phase=test --which_direction=AtoB/BtoA
 ```
 
-## Pretrained models
-My pretrained models are available at https://github.com/vanhuyz/CycleGAN-TensorFlow/releases
+## Datasets
+Download the datasets using the following script:
+```bash
+bash ./download_dataset.sh dataset_name
+```
+- `facades`: 400 images from the [CMP Facades dataset](http://cmp.felk.cvut.cz/~tylecr1/facade/).
+- `cityscapes`: 2975 images from the [Cityscapes training set](https://www.cityscapes-dataset.com/).
+- `maps`: 1096 training images scraped from Google Maps.
+- `horse2zebra`: 939 horse images and 1177 zebra images downloaded from [ImageNet](http://www.image-net.org/) using keywords `wild horse` and `zebra`
+- `apple2orange`: 996 apple images and 1020 orange images downloaded from [ImageNet](http://www.image-net.org/) using keywords `apple` and `navel orange`.
+- `summer2winter_yosemite`: 1273 summer Yosemite images and 854 winter Yosemite images were downloaded using Flickr API. See more details in our paper.
+- `monet2photo`, `vangogh2photo`, `ukiyoe2photo`, `cezanne2photo`: The art images were downloaded from [Wikiart](https://www.wikiart.org/). The real photos are downloaded from Flickr using combination of tags *landscape* and *landscapephotography*. The training set size of each class is Monet:1074, Cezanne:584, Van Gogh:401, Ukiyo-e:1433, Photographs:6853.
+- `iphone2dslr_flower`: both classe of images were downlaoded from Flickr. The training set size of each class is iPhone:1813, DSLR:3316. See more details in our paper.
 
-## Contributing
-Please open an issue if you have any trouble or found anything incorrect in my code :)
+<!--
+## Failure cases
+<img align="left" style="padding:10px" src="imgs/failure_putin.jpg" width=320>
 
-## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Our model does not work well when a test image looks unusual compared to training images as shown in the left figure.  See more typical failure cases [here](https://junyanz.github.io/CycleGAN/images/failures.jpg). On translation tasks that involve color and texture changes, like many of those reported above, the method often succeeds. We have also explored tasks that require geometric changes, with little success. For example, on the task of `dog<->cat` transfiguration, the learned translation degenerates to making minimal changes to the input. We also observe a lingering gap between the results achievable with paired training data and those achieved by our unpaired method. In some cases, this gap may be very hard or even impossible, to close: for example, our method sometimes permutes the labels for tree and building in the output of the cityscapes photos->labels task.
+-->
 
-## References
 
-* CycleGAN paper: https://arxiv.org/abs/1703.10593
-* Official source code in Torch: https://github.com/junyanz/CycleGAN
+## Reference
+- The torch implementation of CycleGAN, https://github.com/junyanz/CycleGAN
+- The tensorflow implementation of pix2pix, https://github.com/yenchenlin/pix2pix-tensorflow
