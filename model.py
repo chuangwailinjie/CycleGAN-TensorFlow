@@ -1,180 +1,280 @@
+from __future__ import division
+import os
+import time
+from glob import glob
 import tensorflow as tf
-import ops
-import utils
-from reader import Reader
-from discriminator import Discriminator
-from generator import Generator
+import numpy as np
+from six.moves import xrange
+from collections import namedtuple
 
-REAL_LABEL = 0.9
+from module import *
+from utils import *
 
-class CycleGAN:
-  def __init__(self,
-               X_train_file='',
-               Y_train_file='',
-               batch_size=1,
-               image_size=256,
-               use_lsgan=True,
-               norm='instance',
-               lambda1=10.0,
-               lambda2=10.0,
-               learning_rate=2e-4,
-               beta1=0.5,
-               ngf=64
-              ):
-    """
-    Args:
-      X_train_file: string, X tfrecords file for training
-      Y_train_file: string Y tfrecords file for training
-      batch_size: integer, batch size
-      image_size: integer, image size
-      lambda1: integer, weight for forward cycle loss (X->Y->X)
-      lambda2: integer, weight for backward cycle loss (Y->X->Y)
-      use_lsgan: boolean
-      norm: 'instance' or 'batch'
-      learning_rate: float, initial learning rate for Adam
-      beta1: float, momentum term of Adam
-      ngf: number of gen filters in first conv layer
-    """
-    self.lambda1 = lambda1
-    self.lambda2 = lambda2
-    self.use_lsgan = use_lsgan
-    use_sigmoid = not use_lsgan
-    self.batch_size = batch_size
-    self.image_size = image_size
-    self.learning_rate = learning_rate
-    self.beta1 = beta1
-    self.X_train_file = X_train_file
-    self.Y_train_file = Y_train_file
 
-    self.is_training = tf.placeholder_with_default(True, shape=[], name='is_training')
+class cyclegan(object):
+    def __init__(self, sess, args):
+        self.sess = sess
+        self.batch_size = args.batch_size
+        self.image_size = args.fine_size
+        self.input_c_dim = args.input_nc
+        self.output_c_dim = args.output_nc
+        self.L1_lambda = args.L1_lambda
+        self.dataset_dir = args.dataset_dir
 
-    self.G = Generator('G', self.is_training, ngf=ngf, norm=norm, image_size=image_size)
-    self.D_Y = Discriminator('D_Y',
-        self.is_training, norm=norm, use_sigmoid=use_sigmoid)
-    self.F = Generator('F', self.is_training, norm=norm, image_size=image_size)
-    self.D_X = Discriminator('D_X',
-        self.is_training, norm=norm, use_sigmoid=use_sigmoid)
+        self.discriminator = discriminator
+        if args.use_resnet:
+            self.generator = generator_resnet
+        else:
+            self.generator = generator_unet
+        if args.use_lsgan:
+            self.criterionGAN = mae_criterion
+        else:
+            self.criterionGAN = sce_criterion
 
-    self.fake_x = tf.placeholder(tf.float32,
-        shape=[batch_size, image_size, image_size, 3])
-    self.fake_y = tf.placeholder(tf.float32,
-        shape=[batch_size, image_size, image_size, 3])
+        OPTIONS = namedtuple('OPTIONS', 'batch_size image_size \
+                              gf_dim df_dim output_c_dim')
+        self.options = OPTIONS._make((args.batch_size, args.fine_size,
+                                      args.ngf, args.ndf, args.output_nc))
 
-  def model(self):
-    X_reader = Reader(self.X_train_file, name='X',
-        image_size=self.image_size, batch_size=self.batch_size)
-    Y_reader = Reader(self.Y_train_file, name='Y',
-        image_size=self.image_size, batch_size=self.batch_size)
+        self._build_model()
+        self.saver = tf.train.Saver()
+        self.pool = ImagePool(args.max_size)
 
-    x = X_reader.feed()
-    y = Y_reader.feed()
+    def _build_model(self):
+        self.real_data = tf.placeholder(tf.float32,
+                                        [None, self.image_size, self.image_size,
+                                         self.input_c_dim + self.output_c_dim],
+                                        name='real_A_and_B_images')
 
-    cycle_loss = self.cycle_consistency_loss(self.G, self.F, x, y)
+        self.real_A = self.real_data[:, :, :, :self.input_c_dim]
+        self.real_B = self.real_data[:, :, :, self.input_c_dim:self.input_c_dim + self.output_c_dim]
 
-    # X -> Y
-    fake_y = self.G(x)
-    G_gan_loss = self.generator_loss(self.D_Y, fake_y, use_lsgan=self.use_lsgan)
-    G_loss =  G_gan_loss + cycle_loss
-    D_Y_loss = self.discriminator_loss(self.D_Y, y, self.fake_y, use_lsgan=self.use_lsgan)
+        #两次generate生成器，试图使得fakeA跟real_A很相似，下面的fake_B_也是一样
+        self.fake_B = self.generator(self.real_A, self.options, False, name="generatorA2B")
+        self.fake_A_ = self.generator(self.fake_B, self.options, False, name="generatorB2A")
 
-    # Y -> X
-    fake_x = self.F(y)
-    F_gan_loss = self.generator_loss(self.D_X, fake_x, use_lsgan=self.use_lsgan)
-    F_loss = F_gan_loss + cycle_loss
-    D_X_loss = self.discriminator_loss(self.D_X, x, self.fake_x, use_lsgan=self.use_lsgan)
 
-    # summary
-    tf.summary.histogram('D_Y/true', self.D_Y(y))
-    tf.summary.histogram('D_Y/fake', self.D_Y(self.G(x)))
-    tf.summary.histogram('D_X/true', self.D_X(x))
-    tf.summary.histogram('D_X/fake', self.D_X(self.F(y)))
+        self.fake_A = self.generator(self.real_B, self.options, True, name="generatorB2A")
+        self.fake_B_ = self.generator(self.fake_A, self.options, True, name="generatorA2B")
 
-    tf.summary.scalar('loss/G', G_gan_loss)
-    tf.summary.scalar('loss/D_Y', D_Y_loss)
-    tf.summary.scalar('loss/F', F_gan_loss)
-    tf.summary.scalar('loss/D_X', D_X_loss)
-    tf.summary.scalar('loss/cycle', cycle_loss)
+        #DB_fake来鉴别domianB中的和从domainA经过生成器转换的fake_B，DB_fake相当于D(G(B))
+        self.DB_fake = self.discriminator(self.fake_B, self.options, reuse=False, name="discriminatorB")
+        
+        self.DA_fake = self.discriminator(self.fake_A, self.options, reuse=False, name="discriminatorA")
 
-    tf.summary.image('X/generated', utils.batch_convert2int(self.G(x)))
-    tf.summary.image('X/reconstruction', utils.batch_convert2int(self.F(self.G(x))))
-    tf.summary.image('Y/generated', utils.batch_convert2int(self.F(y)))
-    tf.summary.image('Y/reconstruction', utils.batch_convert2int(self.G(self.F(y))))
+        #需要优化的两个损失函数，abs_criterion是两数值相减的平方
+        #第一项tf.ones_like就是全1的向量与相同size的鉴别器的误差平法
+        #与D的loss function分开了，G试图使得下面的loss尽可能的小
+        self.g_loss_a2b = self.criterionGAN(self.DB_fake, tf.ones_like(self.DB_fake)) \
+                          + self.L1_lambda * abs_criterion(self.real_A, self.fake_A_) \
+                          + self.L1_lambda * abs_criterion(self.real_B, self.fake_B_)
+        self.g_loss_b2a = self.criterionGAN(self.DA_fake, tf.ones_like(self.DA_fake)) \
+                          + self.L1_lambda * abs_criterion(self.real_A, self.fake_A_) \
+                          + self.L1_lambda * abs_criterion(self.real_B, self.fake_B_)
 
-    return G_loss, D_Y_loss, F_loss, D_X_loss, fake_y, fake_x
+        
+        self.fake_A_sample = tf.placeholder(tf.float32,
+                                            [None, self.image_size, self.image_size,
+                                             self.input_c_dim], name='fake_A_sample')
+        self.fake_B_sample = tf.placeholder(tf.float32,
+                                            [None, self.image_size, self.image_size,
+                                             self.output_c_dim], name='fake_B_sample')
+        
+        self.DB_real = self.discriminator(self.real_B, self.options, reuse=True, name="discriminatorB")
+        self.DA_real = self.discriminator(self.real_A, self.options, reuse=True, name="discriminatorA")
+        self.DB_fake_sample = self.discriminator(self.fake_B_sample, self.options, reuse=True, name="discriminatorB")
+        self.DA_fake_sample = self.discriminator(self.fake_A_sample, self.options, reuse=True, name="discriminatorA")
+        
 
-  def optimize(self, G_loss, D_Y_loss, F_loss, D_X_loss):
-    def make_optimizer(loss, variables, name='Adam'):
-      """ Adam optimizer with learning rate 0.0002 for the first 100k steps (~100 epochs)
-          and a linearly decaying rate that goes to zero over the next 100k steps
-      """
-      global_step = tf.Variable(0, trainable=False)
-      starter_learning_rate = self.learning_rate
-      end_learning_rate = 0.0
-      start_decay_step = 100000
-      decay_steps = 100000
-      beta1 = self.beta1
-      learning_rate = (
-          tf.where(
-                  tf.greater_equal(global_step, start_decay_step),
-                  tf.train.polynomial_decay(starter_learning_rate, global_step-start_decay_step,
-                                            decay_steps, end_learning_rate,
-                                            power=1.0),
-                  starter_learning_rate
-          )
+        #这里是与上面的loss function分开了，是鉴别器的loss function，D尽量的使得下面的loss小，只与D相关
+        self.db_loss_real = self.criterionGAN(self.DB_real, tf.ones_like(self.DB_real))
+        self.db_loss_fake = self.criterionGAN(self.DB_fake_sample, tf.zeros_like(self.DB_fake_sample))
+        self.db_loss = (self.db_loss_real + self.db_loss_fake) / 2
+        self.da_loss_real = self.criterionGAN(self.DA_real, tf.ones_like(self.DA_real))
+        self.da_loss_fake = self.criterionGAN(self.DA_fake_sample, tf.zeros_like(self.DA_fake_sample))
+        self.da_loss = (self.da_loss_real + self.da_loss_fake) / 2
 
-      )
-      tf.summary.scalar('learning_rate/{}'.format(name), learning_rate)
+        self.g_a2b_sum = tf.summary.scalar("g_loss_a2b", self.g_loss_a2b)
+        self.g_b2a_sum = tf.summary.scalar("g_loss_b2a", self.g_loss_b2a)
+        self.db_loss_sum = tf.summary.scalar("db_loss", self.db_loss)
+        self.da_loss_sum = tf.summary.scalar("da_loss", self.da_loss)
+        self.db_loss_real_sum = tf.summary.scalar("db_loss_real", self.db_loss_real)
+        self.db_loss_fake_sum = tf.summary.scalar("db_loss_fake", self.db_loss_fake)
+        self.da_loss_real_sum = tf.summary.scalar("da_loss_real", self.da_loss_real)
+        self.da_loss_fake_sum = tf.summary.scalar("da_loss_fake", self.da_loss_fake)
+        self.db_sum = tf.summary.merge(
+            [self.db_loss_sum, self.db_loss_real_sum, self.db_loss_fake_sum]
+        )
+        self.da_sum = tf.summary.merge(
+            [self.da_loss_sum, self.da_loss_real_sum, self.da_loss_fake_sum]
+        )
 
-      learning_step = (
-          tf.train.AdamOptimizer(learning_rate, beta1=beta1, name=name)
-                  .minimize(loss, global_step=global_step, var_list=variables)
-      )
-      return learning_step
+        self.test_A = tf.placeholder(tf.float32,
+                                     [None, self.image_size, self.image_size,
+                                      self.input_c_dim], name='test_A')
+        self.test_B = tf.placeholder(tf.float32,
+                                     [None, self.image_size, self.image_size,
+                                      self.output_c_dim], name='test_B')
+        self.testB = self.generator(self.test_A, self.options, True, name="generatorA2B")
+        self.testA = self.generator(self.test_B, self.options, True, name="generatorB2A")
 
-    G_optimizer = make_optimizer(G_loss, self.G.variables, name='Adam_G')
-    D_Y_optimizer = make_optimizer(D_Y_loss, self.D_Y.variables, name='Adam_D_Y')
-    F_optimizer =  make_optimizer(F_loss, self.F.variables, name='Adam_F')
-    D_X_optimizer = make_optimizer(D_X_loss, self.D_X.variables, name='Adam_D_X')
+        t_vars = tf.trainable_variables()
+        self.db_vars = [var for var in t_vars if 'discriminatorB' in var.name]
+        self.da_vars = [var for var in t_vars if 'discriminatorA' in var.name]
+        self.g_vars_a2b = [var for var in t_vars if 'generatorA2B' in var.name]
+        self.g_vars_b2a = [var for var in t_vars if 'generatorB2A' in var.name]
+        for var in t_vars: print(var.name)
 
-    with tf.control_dependencies([G_optimizer, D_Y_optimizer, F_optimizer, D_X_optimizer]):
-      return tf.no_op(name='optimizers')
+    def train(self, args):
+        """Train cyclegan"""
+        self.da_optim = tf.train.AdamOptimizer(args.lr, beta1=args.beta1) \
+            .minimize(self.da_loss, var_list=self.da_vars)
+        self.db_optim = tf.train.AdamOptimizer(args.lr, beta1=args.beta1) \
+            .minimize(self.db_loss, var_list=self.db_vars)
+        self.g_a2b_optim = tf.train.AdamOptimizer(args.lr, beta1=args.beta1) \
+            .minimize(self.g_loss_a2b, var_list=self.g_vars_a2b)
+        self.g_b2a_optim = tf.train.AdamOptimizer(args.lr, beta1=args.beta1) \
+            .minimize(self.g_loss_b2a, var_list=self.g_vars_b2a)
 
-  def discriminator_loss(self, D, y, fake_y, use_lsgan=True):
-    """ Note: default: D(y).shape == (batch_size,5,5,1),
-                       fake_buffer_size=50, batch_size=1
-    Args:
-      G: generator object
-      D: discriminator object
-      y: 4D tensor (batch_size, image_size, image_size, 3)
-    Returns:
-      loss: scalar
-    """
-    if use_lsgan:
-      # use mean squared error
-      error_real = tf.reduce_mean(tf.squared_difference(D(y), REAL_LABEL))
-      error_fake = tf.reduce_mean(tf.square(D(fake_y)))
-    else:
-      # use cross entropy
-      error_real = -tf.reduce_mean(ops.safe_log(D(y)))
-      error_fake = -tf.reduce_mean(ops.safe_log(1-D(fake_y)))
-    loss = (error_real + error_fake) / 2
-    return loss
+        init_op = tf.global_variables_initializer()
+        self.sess.run(init_op)
+        self.writer = tf.summary.FileWriter("./logs", self.sess.graph)
 
-  def generator_loss(self, D, fake_y, use_lsgan=True):
-    """  fool discriminator into believing that G(x) is real
-    """
-    if use_lsgan:
-      # use mean squared error
-      loss = tf.reduce_mean(tf.squared_difference(D(fake_y), REAL_LABEL))
-    else:
-      # heuristic, non-saturating loss
-      loss = -tf.reduce_mean(ops.safe_log(D(fake_y))) / 2
-    return loss
+        counter = 1
+        start_time = time.time()
 
-  def cycle_consistency_loss(self, G, F, x, y):
-    """ cycle consistency loss (L1 norm)
-    """
-    forward_loss = tf.reduce_mean(tf.abs(F(G(x))-x))
-    backward_loss = tf.reduce_mean(tf.abs(G(F(y))-y))
-    loss = self.lambda1*forward_loss + self.lambda2*backward_loss
-    return loss
+        if self.load(args.checkpoint_dir):
+            print(" [*] Load SUCCESS")
+        else:
+            print(" [!] Load failed...")
+
+        for epoch in range(args.epoch):
+            dataA = glob('./datasets/{}/*.*'.format(self.dataset_dir + '/trainA'))
+            dataB = glob('./datasets/{}/*.*'.format(self.dataset_dir + '/trainB'))
+            np.random.shuffle(dataA)
+            np.random.shuffle(dataB)
+            batch_idxs = min(min(len(dataA), len(dataB)), args.train_size) // self.batch_size
+
+            for idx in range(0, batch_idxs):
+                batch_files = list(zip(dataA[idx * self.batch_size:(idx + 1) * self.batch_size],
+                                       dataB[idx * self.batch_size:(idx + 1) * self.batch_size]))
+                batch_images = [load_data(batch_file) for batch_file in batch_files]
+                batch_images = np.array(batch_images).astype(np.float32)
+
+                # Forward G network
+                fake_A, fake_B = self.sess.run([self.fake_A, self.fake_B],
+                                               feed_dict={self.real_data: batch_images})
+                [fake_A, fake_B] = self.pool([fake_A, fake_B])
+                # Update G network
+                _, summary_str = self.sess.run([self.g_a2b_optim, self.g_a2b_sum],
+                                               feed_dict={self.real_data: batch_images})
+                self.writer.add_summary(summary_str, counter)
+                # Update D network
+                _, summary_str = self.sess.run([self.db_optim, self.db_sum],
+                                               feed_dict={self.real_data: batch_images,
+                                                          self.fake_B_sample: fake_B})
+                self.writer.add_summary(summary_str, counter)
+                # Update G network
+                _, summary_str = self.sess.run([self.g_b2a_optim, self.g_b2a_sum],
+                                               feed_dict={self.real_data: batch_images})
+                self.writer.add_summary(summary_str, counter)
+                # Update D network
+                _, summary_str = self.sess.run([self.da_optim, self.da_sum],
+                                               feed_dict={self.real_data: batch_images,
+                                                          self.fake_A_sample: fake_A})
+                self.writer.add_summary(summary_str, counter)
+
+                counter += 1
+                print(("Epoch: [%2d] [%4d/%4d] time: %4.4f" \
+                       % (epoch, idx, batch_idxs, time.time() - start_time)))
+
+                if np.mod(counter, 100) == 1:
+                    self.sample_model(args.sample_dir, epoch, idx)
+
+                if np.mod(counter, 1000) == 2:
+                    self.save(args.checkpoint_dir, counter)
+
+    def save(self, checkpoint_dir, step):
+        model_name = "cyclegan.model"
+        model_dir = "%s_%s" % (self.dataset_dir, self.image_size)
+        checkpoint_dir = os.path.join(checkpoint_dir, model_dir)
+
+        if not os.path.exists(checkpoint_dir):
+            os.makedirs(checkpoint_dir)
+
+        self.saver.save(self.sess,
+                        os.path.join(checkpoint_dir, model_name),
+                        global_step=step)
+
+    def load(self, checkpoint_dir):
+        print(" [*] Reading checkpoint...")
+
+        model_dir = "%s_%s" % (self.dataset_dir, self.image_size)
+        checkpoint_dir = os.path.join(checkpoint_dir, model_dir)
+
+        ckpt = tf.train.get_checkpoint_state(checkpoint_dir)
+        if ckpt and ckpt.model_checkpoint_path:
+            ckpt_name = os.path.basename(ckpt.model_checkpoint_path)
+            self.saver.restore(self.sess, os.path.join(checkpoint_dir, ckpt_name))
+            return True
+        else:
+            return False
+
+    def sample_model(self, sample_dir, epoch, idx):
+        dataA = glob('./datasets/{}/*.*'.format(self.dataset_dir + '/testA'))
+        dataB = glob('./datasets/{}/*.*'.format(self.dataset_dir + '/testB'))
+        np.random.shuffle(dataA)
+        np.random.shuffle(dataB)
+        batch_files = list(zip(dataA[:self.batch_size], dataB[:self.batch_size]))
+        sample_images = [load_data(batch_file, False, True) for batch_file in batch_files]
+        sample_images = np.array(sample_images).astype(np.float32)
+
+        fake_A, fake_B = self.sess.run(
+            [self.fake_A, self.fake_B],
+            feed_dict={self.real_data: sample_images}
+        )
+        save_images(fake_A, [self.batch_size, 1],
+                    './{}/A_{:02d}_{:04d}.jpg'.format(sample_dir, epoch, idx))
+        save_images(fake_B, [self.batch_size, 1],
+                    './{}/B_{:02d}_{:04d}.jpg'.format(sample_dir, epoch, idx))
+
+    def test(self, args):
+        """Test cyclegan"""
+        init_op = tf.global_variables_initializer()
+        self.sess.run(init_op)
+        if args.which_direction == 'AtoB':
+            sample_files = glob('./datasets/{}/*.*'.format(self.dataset_dir + '/testA'))
+        elif args.which_direction == 'BtoA':
+            sample_files = glob('./datasets/{}/*.*'.format(self.dataset_dir + '/testB'))
+        else:
+            raise Exception('--which_direction must be AtoB or BtoA')
+
+        if self.load(args.checkpoint_dir):
+            print(" [*] Load SUCCESS")
+        else:
+            print(" [!] Load failed...")
+
+        # write html for visual comparison
+        index_path = os.path.join(args.test_dir, '{0}_index.html'.format(args.which_direction))
+        index = open(index_path, "w")
+        index.write("<html><body><table><tr>")
+        index.write("<th>name</th><th>input</th><th>output</th></tr>")
+
+        out_var, in_var = (self.testB, self.test_A) if args.which_direction == 'AtoB' else (
+            self.testA, self.test_B)
+
+        for sample_file in sample_files:
+            print('Processing image: ' + sample_file)
+            sample_image = [load_test_data(sample_file)]
+            sample_image = np.array(sample_image).astype(np.float32)
+            image_path = os.path.join(args.test_dir,
+                                      '{0}_{1}'.format(args.which_direction, os.path.basename(sample_file)))
+            fake_img = self.sess.run(out_var, feed_dict={in_var: sample_image})
+            save_images(fake_img, [1, 1], image_path)
+            index.write("<td>%s</td>" % os.path.basename(image_path))
+            index.write("<td><img src='%s'></td>" % (sample_file if os.path.isabs(sample_file) else (
+            '..' + os.path.sep + sample_file)))
+            index.write("<td><img src='%s'></td>" % (image_path if os.path.isabs(image_path) else (
+            '..' + os.path.sep + image_path)))
+            index.write("</tr>")
+        index.close()
