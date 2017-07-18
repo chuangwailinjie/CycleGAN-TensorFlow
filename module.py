@@ -55,8 +55,9 @@ def generator_unet(image, options, reuse=False, name="generator"):#cycleGAN的�
         # e8 is (1 x 1 x self.gf_dim*8)
 
         #注意这里的每一个encoder包含两个步骤，一个是进行反卷积，一个是通过skip-connection结构来获取
-        #num_layer-i层的信息，不再有中间的瓶颈层，不用将所有的information在所有层中传输
+        #num_layer-i层的信息，e8就是中间的瓶颈层，不用将所有的information在所有层中传输
         #直接使用了tf.concat在第3维度，也就是channel上讲数据拼接
+        #注意这里的conv2d没有用上面conv的转置卷积核fliter，也是通过学习得到的fliter，只不过fliter与上面对应的conv的fliter是转置shape
         d1 = deconv2d(tf.nn.relu(e8), options.gf_dim*8, name='g_d1')
         d1 = tf.concat([tf.nn.dropout(instance_norm(d1, 'g_bn_d1'), 0.5), e7], 3)
         # d1 is (2 x 2 x self.gf_dim*8*2)
